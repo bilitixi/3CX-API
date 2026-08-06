@@ -1,0 +1,82 @@
+from typing import Any, Dict, Optional
+
+import httpx
+
+from app.core.config import settings
+from app.core.exceptions import ThreeCXAuthenticationError, ThreeCXServiceUnavailableError
+from app.core.logging import logger
+from app.services.token_manager import ThreeCXTokenManager, token_manager as default_token_manager
+
+MAX_RETRIES = 1
+
+
+class ThreeCXClient:
+    """Thin REST wrapper over the 3CX Call Control API.
+
+    Every request fetches a token via the shared `ThreeCXTokenManager` rather than
+    holding one directly, and retries once on a 401 (treated as "token invalid/expired").
+    """
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        token_manager: Optional[ThreeCXTokenManager] = None,
+    ):
+        self.base_url = (base_url or settings.threecx_pbx_base_url).rstrip("/")
+        self.token_manager = token_manager or default_token_manager
+
+    async def _request(self, method: str, path: str, force_refresh: bool = False, **kwargs: Any) -> Any:
+        token = await self.token_manager.get_valid_token(force_refresh=force_refresh)
+        headers = {**kwargs.pop("headers", {}), "Authorization": f"Bearer {token}"}
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+                response = await client.request(method, f"{self.base_url}{path}", headers=headers, **kwargs)
+        except httpx.RequestError as exc:
+            raise ThreeCXServiceUnavailableError(f"3CX request failed: {exc}") from exc
+
+        if response.status_code == 401 and not force_refresh:
+            logger.warning("threecx_401_retrying_with_fresh_token", path=path)
+            return await self._request(method, path, force_refresh=True, headers=headers, **kwargs)
+        if response.status_code == 401:
+            raise ThreeCXAuthenticationError(f"3CX rejected refreshed token for {path}")
+        if response.status_code >= 500:
+            raise ThreeCXServiceUnavailableError(f"3CX server error {response.status_code} on {path}")
+
+        response.raise_for_status()
+        if not response.content:
+            return None
+        return response.json()
+
+    async def make_call(
+        self,
+        dn: str,
+        destination: str,
+        timeout_ms: int = 30000,
+        reason: str = "call",
+    ) -> Dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/callcontrol/{dn}/makecall",
+            json={"reason": reason, "destination": destination, "timeout": timeout_ms},
+        )
+
+    async def get_entity(self, path: str) -> Optional[Dict[str, Any]]:
+        """Fetch the current state of a callcontrol entity (e.g. a participant).
+
+        3CX's WebSocket push only announces that an entity at `path` changed
+        (event_type + entity path) without the entity's data, so callers must
+        GET it to see the actual status.
+        """
+        return await self._request("GET", path)
+
+    async def get_participants(self, dn: str) -> list:
+        """Return the current participant list for a DN (extension or queue)."""
+        entity = await self.get_entity(f"/callcontrol/{dn}")
+        return (entity or {}).get("Participants", [])
+
+    async def drop_participant(self, dn: str, participant_id: Any) -> None:
+        """Hang up a single participant, e.g. to stop the other still-ringing
+        queue members once one of them has already answered.
+        """
+        await self._request("POST", f"/callcontrol/{dn}/participants/{participant_id}/drop")
