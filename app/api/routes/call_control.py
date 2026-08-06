@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, status
 from app.core.config import settings
 from app.core.exceptions import ThreeCXNotConfiguredError
 from app.schemas.call_control import (
+    CapturedDtmfResponse,
     DialIntoQueueRequest,
     DialIntoQueueResponse,
 )
@@ -49,4 +50,27 @@ async def dial_into_queue(payload: DialIntoQueueRequest = DialIntoQueueRequest()
     call_id = (result or {}).get("CallId", (result or {}).get("Callid"))
     queue_answer_watcher.watch(call_id)
 
-    return DialIntoQueueResponse(source_dn=source_dn, queue_dn=queue_dn)
+    return DialIntoQueueResponse(source_dn=source_dn, queue_dn=queue_dn, call_id=call_id)
+
+
+@router.get("/{call_id}/dtmf", response_model=CapturedDtmfResponse)
+async def get_captured_dtmf(call_id: str) -> CapturedDtmfResponse:
+    """Return any DTMF digit-strings 3CX has reported for this call id so far.
+
+    This is exploratory: 3CX's callcontrol WebSocket carries a `dtmf_input` field on
+    some events, but whether it fires for a participant bridged via /makecall (as
+    opposed to one an app is directly streaming audio to/from) hasn't been confirmed.
+    Call this after dialing into a queue and keying in digits on the answering side
+    to check whether anything was captured. call_id is matched as a string so it works
+    whether 3CX's CallId is numeric or not.
+    """
+    digits = queue_answer_watcher.get_captured_dtmf(call_id)
+    if not digits:
+        # CallId from 3CX may be an int; the watcher keys captures by whatever type
+        # it received, so also try a numeric match for a string call_id from the URL.
+        try:
+            digits = queue_answer_watcher.get_captured_dtmf(int(call_id))
+        except ValueError:
+            pass
+
+    return CapturedDtmfResponse(call_id=call_id, digits=digits)

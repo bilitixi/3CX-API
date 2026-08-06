@@ -22,6 +22,35 @@ curl -X POST https://your-host/api/threecx/calls/dial-into-queue \
   -d '{"source_dn": "0800111222"}'
 ```
 
+The response includes the 3CX `call_id` for the call:
+
+```json
+{ "source_dn": "0800111222", "queue_dn": "8003", "call_id": 60 }
+```
+
+## Capturing DTMF digits (exploratory)
+
+`GET /api/threecx/calls/{call_id}/dtmf` returns any DTMF digit-strings 3CX
+has reported for that call so far:
+
+```bash
+curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  https://your-host/api/threecx/calls/60/dtmf
+# {"call_id": "60", "digits": ["1234"]}
+```
+
+This relies on 3CX's callcontrol WebSocket occasionally carrying a
+`dtmf_input` field on participant events (`event.attached_data.dtmf_input`,
+per 3CX's own
+[Custom IVR sample](https://github.com/3cx/call-control-examples)). Whether
+this fires for a participant bridged in via `/makecall` — as opposed to one
+an app is directly streaming prompt audio to/from, like that sample —
+**hasn't been confirmed**. To test it: dial into a queue, key in digits once
+the queue side answers, then poll the endpoint above. If it stays empty,
+DTMF capture for this flow will need a 3CX Call Flow Designer app instead
+(see `app/services/escalation.py` docstring for the WebSocket message shape
+this is built on).
+
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in:

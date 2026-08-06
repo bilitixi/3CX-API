@@ -30,7 +30,7 @@ def test_dial_into_queue_rings_source_then_connects_queue(client, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"source_dn": "0800111222", "queue_dn": "8002"}
+    assert response.json() == {"source_dn": "0800111222", "queue_dn": "8002", "call_id": 50}
     assert calls == [("0800111222", "8002")]
 
 
@@ -49,7 +49,7 @@ def test_dial_into_queue_uses_given_queue_dn_override(client, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"source_dn": "0800111222", "queue_dn": "8005"}
+    assert response.json() == {"source_dn": "0800111222", "queue_dn": "8005", "call_id": 51}
     assert calls == [("0800111222", "8005")]
 
 
@@ -66,7 +66,7 @@ def test_dial_into_queue_uses_configured_source_dn_when_body_omitted(client, mon
     response = client.post("/api/threecx/calls/dial-into-queue")
 
     assert response.status_code == 200
-    assert response.json() == {"source_dn": "0800111222", "queue_dn": "8002"}
+    assert response.json() == {"source_dn": "0800111222", "queue_dn": "8002", "call_id": 52}
     assert calls == [("0800111222", "8002")]
 
 
@@ -86,3 +86,23 @@ def test_dial_into_queue_503_when_not_configured(client, monkeypatch):
     )
 
     assert response.status_code == 503
+
+
+def test_get_captured_dtmf_returns_empty_when_nothing_captured(client):
+    response = client.get("/api/threecx/calls/999/dtmf")
+
+    assert response.status_code == 200
+    assert response.json() == {"call_id": "999", "digits": []}
+
+
+def test_get_captured_dtmf_returns_digits_captured_for_call(client, monkeypatch):
+    monkeypatch.setattr(
+        call_control.queue_answer_watcher,
+        "get_captured_dtmf",
+        lambda call_id: ["1234"] if call_id in (60, "60") else [],
+    )
+
+    response = client.get("/api/threecx/calls/60/dtmf")
+
+    assert response.status_code == 200
+    assert response.json() == {"call_id": "60", "digits": ["1234"]}

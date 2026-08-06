@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -17,3 +17,16 @@ class DialIntoQueueRequest(BaseModel):
 class DialIntoQueueResponse(BaseModel):
     source_dn: str
     queue_dn: str
+    call_id: Optional[Any] = Field(
+        None,
+        description="3CX call id for this call, as returned by makecall. Pass to "
+        "GET /calls/{call_id}/dtmf to retrieve any digits keyed in on it.",
+    )
+
+
+class CapturedDtmfResponse(BaseModel):
+    call_id: Any
+    digits: List[str] = Field(
+        default_factory=list,
+        description="DTMF digit-strings 3CX reported for this call, in the order received.",
+    )

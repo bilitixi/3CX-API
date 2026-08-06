@@ -1,6 +1,7 @@
 import asyncio
 import json
-from typing import Any, Optional, Set
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set
 
 import websockets
 
@@ -16,12 +17,16 @@ RECONNECT_DELAY_SECONDS = 5
 
 class QueueAnswerWatcher:
     """Watches 3CX callcontrol WebSocket events and drops the other still-ringing
-    participants of a call as soon as one of them answers.
+    participants of a call as soon as one of them answers. Also captures any DTMF
+    digits 3CX reports a participant as having entered, keyed by call id.
 
-    3CX's WebSocket only pushes "this entity changed" (no payload), so each event
-    is followed by a GET to read the participant's actual status. Reconnects
-    whenever the shared token manager refreshes, since 3CX ties WS auth to the
-    token used at connect time.
+    Every event 3CX pushes over this WebSocket is wrapped as
+    `{"sequence": ..., "event": {"event_type": ..., "entity": ..., "attached_data": {...}}}`.
+    `entity` names the changed participant (e.g. "/callcontrol/1004/participants/7") but
+    carries no participant data itself, so each event is followed by a GET to read its
+    actual status. `attached_data.dtmf_input`, when present, holds digits 3CX detected
+    that participant entering. Reconnects whenever the shared token manager refreshes,
+    since 3CX ties WS auth to the token used at connect time.
     """
 
     def __init__(
@@ -33,12 +38,17 @@ class QueueAnswerWatcher:
         self.token_manager = token_manager or default_token_manager
         self._task: Optional[asyncio.Task] = None
         self._watched_call_ids: Set[Any] = set()
+        self._captured_dtmf: Dict[Any, List[str]] = defaultdict(list)
         self.token_manager.on_refresh(lambda _token: self._reconnect())
 
     def watch(self, call_id) -> None:
         """Start reacting to an answer event for this call id (returned by make_call)."""
         if call_id is not None:
             self._watched_call_ids.add(call_id)
+
+    def get_captured_dtmf(self, call_id) -> List[str]:
+        """Return the DTMF digit-strings reported for this call id so far, in order."""
+        return list(self._captured_dtmf.get(call_id, []))
 
     def start(self) -> None:
         if self.token_manager.is_configured() and self._task is None:
@@ -75,14 +85,13 @@ class QueueAnswerWatcher:
                 await self._handle_message(message)
 
     async def _handle_message(self, message: str) -> None:
-        if not self._watched_call_ids:
-            return
         try:
             payload = json.loads(message)
         except (TypeError, ValueError):
             return
 
-        entity_path = payload.get("entity")
+        event = payload.get("event") or {}
+        entity_path = event.get("entity")
         if not entity_path or "/participants/" not in entity_path:
             return
 
@@ -91,9 +100,19 @@ class QueueAnswerWatcher:
         if not entity:
             return
 
-        status = entity.get("Status")
         call_id = entity.get("CallId", entity.get("Callid"))
-        if status not in CONNECTED_STATUSES or call_id not in self._watched_call_ids:
+
+        attached_data = event.get("attached_data") or {}
+        dtmf_input = attached_data.get("dtmf_input")
+        if dtmf_input:
+            logger.info("threecx_dtmf_received", dn=dn, call_id=call_id, dtmf=dtmf_input)
+            self._captured_dtmf[call_id].append(dtmf_input)
+
+        if not self._watched_call_ids or call_id not in self._watched_call_ids:
+            return
+
+        status = entity.get("Status")
+        if status not in CONNECTED_STATUSES:
             return
 
         await self._drop_other_participants(dn, call_id, connected_id=entity.get("Id"))
