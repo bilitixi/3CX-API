@@ -11,11 +11,13 @@ MAX_RETRIES = 1
 
 
 def _normalize_entity(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """3CX's documented callcontrol schema uses lowercase snake_case field names
-    (id, status, callid, dn, participants, ...). The rest of this codebase was
-    written against PascalCase (Id, Status, CallId, Participants) — re-expose the
-    documented fields under those keys too (without discarding the originals) so
-    existing call sites keep working regardless of which casing 3CX actually sends.
+    """3CX's documented callcontrol schema (GET /callcontrol/{dn}, GET
+    /callcontrol/{dn}/participants/{id}) uses lowercase snake_case field names —
+    id, status, callid, dn, participants, plus devices/type at the DN level that
+    this codebase doesn't use. The rest of this codebase was written against
+    PascalCase (Id, Status, CallId, Participants) — re-expose the documented
+    fields under those keys too (without discarding the originals) so existing
+    call sites keep working regardless of which casing 3CX actually sends.
     """
     if not data:
         return data

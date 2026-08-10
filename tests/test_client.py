@@ -75,6 +75,47 @@ async def test_get_participants_normalizes_each_participant_in_the_list(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_get_participants_against_documented_dn_level_response(monkeypatch):
+    # Full shape taken from 3CX's documented GET /callcontrol/{dnnumber} response,
+    # including devices/type fields this codebase ignores.
+    documented_response = {
+        "dn": "1004",
+        "type": "Queue",
+        "devices": [{"dn": "1004", "device_id": "abc", "user_agent": "3CXPhone"}],
+        "participants": [
+            {
+                "id": 7,
+                "status": "Connected",
+                "dn": "1004",
+                "party_caller_name": "Jane",
+                "party_dn": "1003",
+                "party_caller_id": "1003",
+                "party_did": "",
+                "device_id": "abc",
+                "party_dn_type": "Extension",
+                "direct_control": True,
+                "originated_by_dn": "1003",
+                "originated_by_type": "Extension",
+                "referred_by_dn": "",
+                "referred_by_type": "",
+                "on_behalf_of_dn": "",
+                "on_behalf_of_type": "",
+                "callid": 60,
+                "legid": 1,
+            }
+        ],
+    }
+    client = make_client(monkeypatch, documented_response)
+
+    participants = await client.get_participants("1004")
+
+    assert len(participants) == 1
+    assert participants[0]["Id"] == 7
+    assert participants[0]["Status"] == "Connected"
+    assert participants[0]["CallId"] == 60
+
+
+@pytest.mark.asyncio
 async def test_make_call_unwraps_and_normalizes_the_result_envelope(monkeypatch):
     # Shape taken from 3CX's documented POST /callcontrol/{dnnumber}/makecall response —
     # the call data is nested under "result", not returned flat.
