@@ -75,12 +75,31 @@ async def test_get_participants_normalizes_each_participant_in_the_list(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_make_call_normalizes_call_id_from_snake_case_response(monkeypatch):
-    client = make_client(monkeypatch, {"callid": 42, "status": "Ringing"})
+async def test_make_call_unwraps_and_normalizes_the_result_envelope(monkeypatch):
+    # Shape taken from 3CX's documented POST /callcontrol/{dnnumber}/makecall response —
+    # the call data is nested under "result", not returned flat.
+    documented_response = {
+        "finalstatus": "Success",
+        "reason": "string",
+        "reasontext": "string",
+        "result": {"id": 7, "status": "Ringing", "callid": 42},
+    }
+    client = make_client(monkeypatch, documented_response)
 
     result = await client.make_call("1003", "1004")
 
     assert result["CallId"] == 42
+    assert result["Id"] == 7
+    assert result["Status"] == "Ringing"
+
+
+@pytest.mark.asyncio
+async def test_make_call_returns_empty_dict_when_result_missing(monkeypatch):
+    client = make_client(monkeypatch, {"finalstatus": "Failure", "reasontext": "no free device"})
+
+    result = await client.make_call("1003", "1004")
+
+    assert result == {}
 
 
 @pytest.mark.asyncio

@@ -77,14 +77,30 @@ class ThreeCXClient:
         dn: str,
         destination: str,
         timeout_ms: int = 30000,
-        reason: str = "call",
     ) -> Dict[str, Any]:
-        result = await self._request(
+        """Initiate a call from `dn` to `destination`.
+
+        3CX's documented response envelope wraps the actual call/participant data
+        under `result` (alongside `finalstatus`/`reason`/`reasontext` describing the
+        makecall request itself, not the call) — it is NOT a flat participant object:
+        `{"finalstatus": ..., "reason": ..., "reasontext": ..., "result": {"callid": ..., "id": ..., "status": ..., ...}}`.
+        This returns that inner `result`, normalized like `get_entity`.
+        """
+        response = await self._request(
             "POST",
             f"/callcontrol/{dn}/makecall",
-            json={"reason": reason, "destination": destination, "timeout": timeout_ms},
+            json={"destination": destination, "timeout": timeout_ms},
         )
-        return _normalize_entity(result) or {}
+        response = response or {}
+        logger.info(
+            "threecx_makecall_response",
+            dn=dn,
+            destination=destination,
+            finalstatus=response.get("finalstatus"),
+            reason=response.get("reason"),
+            reasontext=response.get("reasontext"),
+        )
+        return _normalize_entity(response.get("result")) or {}
 
     async def get_entity(self, path: str) -> Optional[Dict[str, Any]]:
         """Fetch the current state of a callcontrol entity (e.g. a participant).
