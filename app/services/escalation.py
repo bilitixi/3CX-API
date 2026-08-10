@@ -3,6 +3,7 @@ import json
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set
 
+import httpx
 import websockets
 
 from app.core.logging import logger
@@ -22,11 +23,15 @@ class QueueAnswerWatcher:
 
     Every event 3CX pushes over this WebSocket is wrapped as
     `{"sequence": ..., "event": {"event_type": ..., "entity": ..., "attached_data": {...}}}`.
-    `entity` names the changed participant (e.g. "/callcontrol/1004/participants/7") but
-    carries no participant data itself, so each event is followed by a GET to read its
-    actual status. `attached_data.dtmf_input`, when present, holds digits 3CX detected
-    that participant entering. Reconnects whenever the shared token manager refreshes,
-    since 3CX ties WS auth to the token used at connect time.
+    `entity` names the changed participant (e.g. "/callcontrol/1004/participants/7").
+    `attached_data.dtmf_input`, when present, holds digits 3CX detected that participant
+    entering, and is read directly off the event — no GET needed. A GET on `entity` is
+    still made to read status/call id (e.g. to know when to drop other participants),
+    but the participant may already be gone by the time that GET runs (e.g. it just
+    hung up), which 3CX reports as 403 rather than 404; that's treated as non-fatal and
+    doesn't cost us DTMF already read from the event, nor tear down the WebSocket.
+    Reconnects whenever the shared token manager refreshes, since 3CX ties WS auth to
+    the token used at connect time.
     """
 
     def __init__(
@@ -96,19 +101,34 @@ class QueueAnswerWatcher:
             return
 
         dn = entity_path.split("/")[2]
-        entity = await self.client.get_entity(entity_path)
-        if not entity:
-            return
 
-        call_id = entity.get("CallId", entity.get("Callid"))
-
+        # attached_data (and any dtmf_input on it) is already in the message we have —
+        # no GET needed to read it. Grab it before the GET below, so a participant
+        # that's already gone by the time we look it up (e.g. it just hung up, which
+        # 3CX reports as 403 rather than 404) doesn't cost us digits it already sent.
         attached_data = event.get("attached_data") or {}
         dtmf_input = attached_data.get("dtmf_input")
-        if dtmf_input:
-            logger.info("threecx_dtmf_received", dn=dn, call_id=call_id, dtmf=dtmf_input)
-            self._captured_dtmf[call_id].append(dtmf_input)
 
-        if not self._watched_call_ids or call_id not in self._watched_call_ids:
+        try:
+            entity = await self.client.get_entity(entity_path)
+        except httpx.HTTPStatusError as exc:
+            logger.info(
+                "threecx_participant_lookup_failed",
+                entity=entity_path,
+                status_code=exc.response.status_code,
+            )
+            entity = None
+
+        call_id = (entity or {}).get("CallId", (entity or {}).get("Callid"))
+
+        if dtmf_input:
+            # Fall back to the raw entity path as the capture key when the participant
+            # is already gone and we couldn't resolve its call id via GET.
+            capture_key = call_id if call_id is not None else entity_path
+            logger.info("threecx_dtmf_received", dn=dn, call_id=capture_key, dtmf=dtmf_input)
+            self._captured_dtmf[capture_key].append(dtmf_input)
+
+        if not entity or not self._watched_call_ids or call_id not in self._watched_call_ids:
             return
 
         status = entity.get("Status")
@@ -119,7 +139,14 @@ class QueueAnswerWatcher:
         self._watched_call_ids.discard(call_id)
 
     async def _drop_other_participants(self, dn: str, call_id, connected_id) -> None:
-        participants = await self.client.get_participants(dn)
+        try:
+            participants = await self.client.get_participants(dn)
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "threecx_get_participants_failed", dn=dn, status_code=exc.response.status_code
+            )
+            return
+
         for participant in participants:
             if participant.get("Id") == connected_id:
                 continue

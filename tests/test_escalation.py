@@ -1,18 +1,28 @@
 import json
 
+import httpx
 import pytest
 
 from app.services.escalation import QueueAnswerWatcher
 
 
+def _http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "https://pbx.example.com:5001/callcontrol/1003/participants/1")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError("error", request=request, response=response)
+
+
 class FakeClient:
-    def __init__(self, entities=None, participants=None):
+    def __init__(self, entities=None, participants=None, entity_errors=None):
         self.base_url = "https://pbx.example.com:5001"
         self.entities = entities or {}
         self.participants = participants or {}
+        self.entity_errors = entity_errors or {}
         self.dropped = []
 
     async def get_entity(self, path):
+        if path in self.entity_errors:
+            raise self.entity_errors[path]
         return self.entities.get(path)
 
     async def get_participants(self, dn):
@@ -139,3 +149,46 @@ async def test_drops_other_participants_on_answer_using_nested_entity_path():
     )
 
     assert client.dropped == [("1004", 8)]
+
+
+@pytest.mark.asyncio
+async def test_dtmf_captured_even_when_participant_lookup_403s():
+    """Reproduces the observed 403-on-hangup case: the participant is gone by the
+    time we GET it, but the digits were already in the WS message and shouldn't
+    be lost — and handling this must not raise (which would tear down the WS).
+    """
+    entity_path = "/callcontrol/1003/participants/164"
+    client = FakeClient(entity_errors={entity_path: _http_status_error(403)})
+    watcher = make_watcher(client)
+
+    await watcher._handle_message(
+        json.dumps(
+            {
+                "event": {
+                    "event_type": 2,
+                    "entity": entity_path,
+                    "attached_data": {"dtmf_input": "5"},
+                }
+            }
+        )
+    )
+
+    # No resolvable call id (GET failed), so it's keyed by the raw entity path instead.
+    assert watcher.get_captured_dtmf(entity_path) == ["5"]
+
+
+@pytest.mark.asyncio
+async def test_escalation_logic_skipped_but_not_fatal_when_participant_lookup_403s():
+    entity_path = "/callcontrol/1003/participants/164"
+    client = FakeClient(entity_errors={entity_path: _http_status_error(403)})
+    watcher = make_watcher(client)
+    watcher.watch(60)
+
+    # Should not raise, and should leave the watched call id untouched since we
+    # never learned its status.
+    await watcher._handle_message(
+        json.dumps({"event": {"event_type": 0, "entity": entity_path, "attached_data": {}}})
+    )
+
+    assert 60 in watcher._watched_call_ids
+    assert client.dropped == []
