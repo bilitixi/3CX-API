@@ -90,6 +90,12 @@ class QueueAnswerWatcher:
                 await self._handle_message(message)
 
     async def _handle_message(self, message: str) -> None:
+        # 3CX doesn't publish a schema for this WebSocket's message body (unlike its
+        # REST endpoints), so the event/entity/attached_data structure this code
+        # assumes is inferred from 3CX's own sample app, not a documented spec. Log
+        # every raw message at debug level so real payloads can be checked against it.
+        logger.debug("threecx_ws_raw_message", message=message)
+
         try:
             payload = json.loads(message)
         except (TypeError, ValueError):
