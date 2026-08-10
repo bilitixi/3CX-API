@@ -10,6 +10,30 @@ from app.services.token_manager import ThreeCXTokenManager, token_manager as def
 MAX_RETRIES = 1
 
 
+def _normalize_entity(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """3CX's documented callcontrol schema uses lowercase snake_case field names
+    (id, status, callid, dn, participants, ...). The rest of this codebase was
+    written against PascalCase (Id, Status, CallId, Participants) — re-expose the
+    documented fields under those keys too (without discarding the originals) so
+    existing call sites keep working regardless of which casing 3CX actually sends.
+    """
+    if not data:
+        return data
+
+    normalized = dict(data)
+    normalized.setdefault("Id", normalized.get("id"))
+    normalized.setdefault("Status", normalized.get("status"))
+    normalized.setdefault("Dn", normalized.get("dn"))
+    if "CallId" not in normalized:
+        normalized["CallId"] = normalized.get("callid", normalized.get("Callid"))
+
+    participants = normalized.get("Participants", normalized.get("participants"))
+    if participants is not None:
+        normalized["Participants"] = [_normalize_entity(p) for p in participants]
+
+    return normalized
+
+
 class ThreeCXClient:
     """Thin REST wrapper over the 3CX Call Control API.
 
@@ -55,11 +79,12 @@ class ThreeCXClient:
         timeout_ms: int = 30000,
         reason: str = "call",
     ) -> Dict[str, Any]:
-        return await self._request(
+        result = await self._request(
             "POST",
             f"/callcontrol/{dn}/makecall",
             json={"reason": reason, "destination": destination, "timeout": timeout_ms},
         )
+        return _normalize_entity(result) or {}
 
     async def get_entity(self, path: str) -> Optional[Dict[str, Any]]:
         """Fetch the current state of a callcontrol entity (e.g. a participant).
@@ -68,7 +93,7 @@ class ThreeCXClient:
         (event_type + entity path) without the entity's data, so callers must
         GET it to see the actual status.
         """
-        return await self._request("GET", path)
+        return _normalize_entity(await self._request("GET", path))
 
     async def get_participants(self, dn: str) -> list:
         """Return the current participant list for a DN (extension or queue)."""
