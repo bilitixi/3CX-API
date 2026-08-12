@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import call_control
 from app.core.auth import require_api_token
 from app.core.logging import configure_logging, logger
+from app.services.call_sequence import call_sequence_manager
 from app.services.escalation import queue_answer_watcher
 
 
@@ -19,6 +20,7 @@ async def lifespan(app: FastAPI):
     yield
 
     queue_answer_watcher.stop()
+    call_sequence_manager.shutdown()
     logger.info("app_shutdown")
 
 

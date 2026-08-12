@@ -3,15 +3,31 @@ from fastapi import APIRouter, HTTPException, status
 from app.core.config import settings
 from app.core.exceptions import ThreeCXNotConfiguredError
 from app.schemas.call_control import (
+    CallSequenceStatusResponse,
     CapturedDtmfResponse,
     DialIntoQueueRequest,
     DialIntoQueueResponse,
+    StartCallSequenceRequest,
 )
+from app.services.call_sequence import SequenceState, call_sequence_manager
 from app.services.client import ThreeCXClient
 from app.services.escalation import queue_answer_watcher
 from app.services.token_manager import token_manager
 
 router = APIRouter(prefix="/calls", tags=["3cx-call-control"])
+
+
+def _sequence_to_response(state: SequenceState) -> CallSequenceStatusResponse:
+    return CallSequenceStatusResponse(
+        sequence_id=state.id,
+        status=state.status,
+        dns=state.dns,
+        queue_dn=state.queue_dn,
+        interval_seconds=state.interval_seconds,
+        current_index=state.current_index,
+        current_dn=state.current_dn,
+        answered_dn=state.answered_dn,
+    )
 
 
 @router.post("/dial-into-queue", response_model=DialIntoQueueResponse)
@@ -74,3 +90,47 @@ async def get_captured_dtmf(call_id: str) -> CapturedDtmfResponse:
             pass
 
     return CapturedDtmfResponse(call_id=call_id, digits=digits)
+
+
+@router.post("/sequence/start", response_model=CallSequenceStatusResponse)
+async def start_call_sequence(payload: StartCallSequenceRequest) -> CallSequenceStatusResponse:
+    """Ring each dn in `dns`, one at a time, into `queue_dn`. Waits `interval_seconds`
+    for an answer before dropping that call and trying the next dn. Stops as soon as
+    one answers. Only one call is ever ringing at a time — the previous one is
+    dropped before the next starts. Returns immediately with the sequence's id and
+    initial status; poll GET /calls/sequence/{sequence_id} for progress, or
+    POST /calls/sequence/{sequence_id}/cancel to stop it early.
+    """
+    if not token_manager.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="3CX Call Control API is not configured",
+        )
+
+    queue_dn = payload.queue_dn or settings.threecx_queue_dn
+    if not queue_dn:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="queue_dn was not provided and THREECX_QUEUE_DN is not set",
+        )
+
+    state = call_sequence_manager.start(payload.dns, queue_dn, payload.interval_seconds)
+    return _sequence_to_response(state)
+
+
+@router.get("/sequence/{sequence_id}", response_model=CallSequenceStatusResponse)
+async def get_call_sequence(sequence_id: str) -> CallSequenceStatusResponse:
+    """Check a call sequence's current status/progress."""
+    state = call_sequence_manager.get(sequence_id)
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown sequence_id")
+    return _sequence_to_response(state)
+
+
+@router.post("/sequence/{sequence_id}/cancel", response_model=CallSequenceStatusResponse)
+async def cancel_call_sequence(sequence_id: str) -> CallSequenceStatusResponse:
+    """Stop a call sequence at any point, dropping whichever dn is currently ringing."""
+    state = await call_sequence_manager.cancel(sequence_id)
+    if state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown sequence_id")
+    return _sequence_to_response(state)

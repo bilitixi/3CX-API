@@ -1,0 +1,112 @@
+import asyncio
+
+import pytest
+
+from app.services.call_sequence import CallSequenceManager
+
+# Keep test intervals well under the manager's poll interval so timeouts and
+# cancellation actually get exercised quickly instead of waiting out a real poll tick.
+FAST_INTERVAL = 0.05
+
+
+class FakeClient:
+    def __init__(self, statuses=None, fail_makecall_for=None):
+        # statuses: dict[dn] -> status string to report for that dn's participant.
+        # Any dn not listed stays "Ringing" (never answers) for the whole test.
+        self.statuses = statuses or {}
+        self.fail_makecall_for = fail_makecall_for or set()
+        self.make_call_calls = []
+        self.dropped = []
+        self._next_id = 1
+
+    async def make_call(self, dn, destination):
+        self.make_call_calls.append((dn, destination))
+        if dn in self.fail_makecall_for:
+            raise RuntimeError("3CX rejected the call")
+        participant_id = self._next_id
+        self._next_id += 1
+        return {"Id": participant_id, "CallId": participant_id}
+
+    async def get_entity(self, path):
+        # path looks like /callcontrol/{dn}/participants/{id}
+        dn = path.split("/")[2]
+        return {"Status": self.statuses.get(dn, "Ringing")}
+
+    async def drop_participant(self, dn, participant_id):
+        self.dropped.append((dn, participant_id))
+
+
+async def _wait_until_finished(state, timeout=2.0):
+    try:
+        await asyncio.wait_for(state.task, timeout=timeout)
+    except asyncio.TimeoutError:
+        pytest.fail(f"sequence {state.id} did not finish within {timeout}s (status={state.status})")
+
+
+@pytest.mark.asyncio
+async def test_sequence_stops_as_soon_as_a_dn_answers():
+    client = FakeClient(statuses={"1005": "Connected"})
+    manager = CallSequenceManager(client=client)
+
+    state = manager.start(["1003", "1005", "1006"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    await _wait_until_finished(state)
+
+    assert state.status == "answered"
+    assert state.answered_dn == "1005"
+    # Should not have gone on to dial 1006 after 1005 answered.
+    assert [dn for dn, _ in client.make_call_calls] == ["1003", "1005"]
+    # The one that timed out (1003) should have been dropped before moving on.
+    assert client.dropped == [("1003", 1)]
+
+
+@pytest.mark.asyncio
+async def test_sequence_exhausts_list_when_nobody_answers():
+    client = FakeClient()  # nobody ever answers
+    manager = CallSequenceManager(client=client)
+
+    state = manager.start(["1003", "1005"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    await _wait_until_finished(state)
+
+    assert state.status == "exhausted"
+    assert [dn for dn, _ in client.make_call_calls] == ["1003", "1005"]
+    assert client.dropped == [("1003", 1), ("1005", 2)]
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_the_sequence_and_drops_the_current_call():
+    client = FakeClient()  # nobody answers, so it'll sit waiting until cancelled
+    manager = CallSequenceManager(client=client)
+
+    state = manager.start(["1003", "1005", "1006"], queue_dn="8003", interval_seconds=10)
+    # Give the loop a tick to place the first call and start waiting.
+    await asyncio.sleep(0.05)
+
+    result = await manager.cancel(state.id)
+    await _wait_until_finished(state)
+
+    assert result is state
+    assert state.status == "cancelled"
+    assert [dn for dn, _ in client.make_call_calls] == ["1003"]
+    assert client.dropped == [("1003", 1)]
+
+
+@pytest.mark.asyncio
+async def test_cancel_unknown_sequence_returns_none():
+    manager = CallSequenceManager(client=FakeClient())
+
+    result = await manager.cancel("does-not-exist")
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_makecall_failure_is_logged_and_sequence_continues():
+    client = FakeClient(fail_makecall_for={"1003"}, statuses={"1005": "Connected"})
+    manager = CallSequenceManager(client=client)
+
+    state = manager.start(["1003", "1005"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    await _wait_until_finished(state)
+
+    assert state.status == "answered"
+    assert state.answered_dn == "1005"
+    assert client.dropped == []  # 1003 never got a participant id to drop
