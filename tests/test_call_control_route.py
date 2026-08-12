@@ -132,6 +132,32 @@ def test_start_call_sequence_400_when_queue_dn_missing(client, monkeypatch):
     assert "queue_dn" in response.json()["detail"]
 
 
+def test_start_call_sequence_400_when_dns_missing_everywhere(client, monkeypatch):
+    monkeypatch.setattr(call_control.settings, "threecx_sequence_dns", "")
+
+    response = client.post("/api/threecx/calls/sequence/start", json={})
+
+    assert response.status_code == 400
+    assert "dns" in response.json()["detail"]
+
+
+def test_start_call_sequence_uses_configured_dns_when_body_omitted(client, monkeypatch):
+    captured = {}
+
+    def fake_start(dns, queue_dn, interval_seconds):
+        captured["args"] = (dns, queue_dn, interval_seconds)
+        return SequenceState(id="seq-1", dns=dns, queue_dn=queue_dn, interval_seconds=interval_seconds)
+
+    monkeypatch.setattr(call_control.settings, "threecx_sequence_dns", "1003,1005, 1006")
+    monkeypatch.setattr(call_control.call_sequence_manager, "start", fake_start)
+
+    response = client.post("/api/threecx/calls/sequence/start")
+
+    assert response.status_code == 200
+    assert response.json()["dns"] == ["1003", "1005", "1006"]
+    assert captured["args"][0] == ["1003", "1005", "1006"]
+
+
 def test_start_call_sequence_returns_initial_state(client, monkeypatch):
     captured = {}
 

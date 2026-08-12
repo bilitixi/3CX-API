@@ -33,10 +33,10 @@ class CapturedDtmfResponse(BaseModel):
 
 
 class StartCallSequenceRequest(BaseModel):
-    dns: List[str] = Field(
-        ...,
-        min_length=1,
-        description="Ordered list of DNs to try, one at a time, e.g. ['1003', '1005', '1006'].",
+    dns: Optional[List[str]] = Field(
+        None,
+        description="Ordered list of DNs to try, one at a time, e.g. ['1003', '1005', '1006']. "
+        "Defaults to THREECX_SEQUENCE_DNS from config if omitted.",
     )
     queue_dn: Optional[str] = Field(
         None,

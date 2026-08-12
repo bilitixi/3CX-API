@@ -93,18 +93,30 @@ async def get_captured_dtmf(call_id: str) -> CapturedDtmfResponse:
 
 
 @router.post("/sequence/start", response_model=CallSequenceStatusResponse)
-async def start_call_sequence(payload: StartCallSequenceRequest) -> CallSequenceStatusResponse:
+async def start_call_sequence(
+    payload: StartCallSequenceRequest = StartCallSequenceRequest(),
+) -> CallSequenceStatusResponse:
     """Ring each dn in `dns`, one at a time, into `queue_dn`. Waits `interval_seconds`
     for an answer before dropping that call and trying the next dn. Stops as soon as
     one answers. Only one call is ever ringing at a time — the previous one is
-    dropped before the next starts. Returns immediately with the sequence's id and
-    initial status; poll GET /calls/sequence/{sequence_id} for progress, or
-    POST /calls/sequence/{sequence_id}/cancel to stop it early.
+    dropped before the next starts. `dns` and `queue_dn` both fall back to config
+    (THREECX_SEQUENCE_DNS, THREECX_QUEUE_DN) when omitted, so this can be called
+    with an empty body. Returns immediately with the sequence's id and initial
+    status; poll GET /calls/sequence/{sequence_id} for progress, or
+    POST /calls/sequence/{sequence_id}/cancel (or /calls/sequence/cancel) to stop
+    it early.
     """
     if not token_manager.is_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="3CX Call Control API is not configured",
+        )
+
+    dns = payload.dns or settings.sequence_dns_list
+    if not dns:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="dns was not provided and THREECX_SEQUENCE_DNS is not set",
         )
 
     queue_dn = payload.queue_dn or settings.threecx_queue_dn
@@ -114,7 +126,7 @@ async def start_call_sequence(payload: StartCallSequenceRequest) -> CallSequence
             detail="queue_dn was not provided and THREECX_QUEUE_DN is not set",
         )
 
-    state = call_sequence_manager.start(payload.dns, queue_dn, payload.interval_seconds)
+    state = call_sequence_manager.start(dns, queue_dn, payload.interval_seconds)
     return _sequence_to_response(state)
 
 
