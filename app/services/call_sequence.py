@@ -40,11 +40,13 @@ class CallSequenceManager:
     def __init__(self, client: Optional[ThreeCXClient] = None):
         self.client = client or ThreeCXClient()
         self._sequences: Dict[str, SequenceState] = {}
+        self._latest_sequence_id: Optional[str] = None
 
     def start(self, dns: List[str], queue_dn: str, interval_seconds: float) -> SequenceState:
         sequence_id = uuid.uuid4().hex
         state = SequenceState(id=sequence_id, dns=dns, queue_dn=queue_dn, interval_seconds=interval_seconds)
         self._sequences[sequence_id] = state
+        self._latest_sequence_id = sequence_id
         state.task = asyncio.create_task(self._run(state))
         return state
 
@@ -58,6 +60,14 @@ class CallSequenceManager:
         if state.status == "running":
             state.cancel_event.set()
         return state
+
+    async def cancel_latest(self) -> Optional[SequenceState]:
+        """Cancel whichever sequence was started most recently (by any caller).
+        Returns None if no sequence has ever been started.
+        """
+        if self._latest_sequence_id is None:
+            return None
+        return await self.cancel(self._latest_sequence_id)
 
     def shutdown(self) -> None:
         """Cancel every in-flight sequence's background task, e.g. on app shutdown."""

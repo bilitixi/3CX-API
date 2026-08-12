@@ -209,3 +209,32 @@ def test_cancel_call_sequence_returns_cancelled_state(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"
+
+
+async def _fake_cancel_latest_none():
+    return None
+
+
+def test_cancel_latest_call_sequence_404_when_none_started(client, monkeypatch):
+    monkeypatch.setattr(call_control.call_sequence_manager, "cancel_latest", _fake_cancel_latest_none)
+
+    response = client.post("/api/threecx/calls/sequence/cancel")
+
+    assert response.status_code == 404
+
+
+def test_cancel_latest_call_sequence_returns_cancelled_state(client, monkeypatch):
+    state = SequenceState(id="seq-2", dns=["1005"], queue_dn="8003", interval_seconds=120)
+    state.status = "cancelled"
+
+    async def fake_cancel_latest():
+        return state
+
+    monkeypatch.setattr(call_control.call_sequence_manager, "cancel_latest", fake_cancel_latest)
+
+    response = client.post("/api/threecx/calls/sequence/cancel")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sequence_id"] == "seq-2"
+    assert body["status"] == "cancelled"

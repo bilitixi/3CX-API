@@ -118,6 +118,21 @@ async def start_call_sequence(payload: StartCallSequenceRequest) -> CallSequence
     return _sequence_to_response(state)
 
 
+@router.post("/sequence/cancel", response_model=CallSequenceStatusResponse)
+async def cancel_latest_call_sequence() -> CallSequenceStatusResponse:
+    """Cancel whichever call sequence was started most recently, without needing
+    its sequence_id. Convenience for callers that only ever run one sequence at
+    a time; use POST /calls/sequence/{sequence_id}/cancel to target a specific
+    one if more than one might be running.
+    """
+    state = await call_sequence_manager.cancel_latest()
+    if state is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No call sequence has been started yet"
+        )
+    return _sequence_to_response(state)
+
+
 @router.get("/sequence/{sequence_id}", response_model=CallSequenceStatusResponse)
 async def get_call_sequence(sequence_id: str) -> CallSequenceStatusResponse:
     """Check a call sequence's current status/progress."""

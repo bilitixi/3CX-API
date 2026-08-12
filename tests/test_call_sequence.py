@@ -100,6 +100,38 @@ async def test_cancel_unknown_sequence_returns_none():
 
 
 @pytest.mark.asyncio
+async def test_cancel_latest_returns_none_when_nothing_ever_started():
+    manager = CallSequenceManager(client=FakeClient())
+
+    result = await manager.cancel_latest()
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_latest_targets_the_most_recently_started_sequence():
+    client = FakeClient()  # nobody answers, both sequences sit waiting
+    manager = CallSequenceManager(client=client)
+
+    first = manager.start(["1003"], queue_dn="8003", interval_seconds=10)
+    await asyncio.sleep(0.02)
+    second = manager.start(["1005"], queue_dn="8003", interval_seconds=10)
+    await asyncio.sleep(0.02)
+
+    result = await manager.cancel_latest()
+    await _wait_until_finished(second)
+
+    assert result is second
+    assert second.status == "cancelled"
+    # The first sequence should be untouched — still running.
+    assert first.status == "running"
+
+    # Clean up the still-running first sequence so the test doesn't leak a task.
+    await manager.cancel(first.id)
+    await _wait_until_finished(first)
+
+
+@pytest.mark.asyncio
 async def test_makecall_failure_is_logged_and_sequence_continues():
     client = FakeClient(fail_makecall_for={"1003"}, statuses={"1005": "Connected"})
     manager = CallSequenceManager(client=client)
