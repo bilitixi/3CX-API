@@ -150,3 +150,26 @@ async def test_get_entity_returns_none_for_empty_response(monkeypatch):
     entity = await client.get_entity("/callcontrol/1003/participants/164")
 
     assert entity is None
+
+
+@pytest.mark.asyncio
+async def test_drop_participant_sends_json_content_type(monkeypatch):
+    # 3CX rejects a bodyless POST to /drop with 415 Unsupported Media Type — it still
+    # wants a JSON content type even with nothing to send, so an empty JSON object
+    # must be passed explicitly rather than omitting the body entirely.
+    client = ThreeCXClient(base_url="https://pbx.example.com:5001", token_manager=FakeTokenManager())
+    captured = {}
+
+    async def fake_request(self, method, path, force_refresh=False, **kwargs):
+        captured["method"] = method
+        captured["path"] = path
+        captured["kwargs"] = kwargs
+        return None
+
+    monkeypatch.setattr(ThreeCXClient, "_request", fake_request)
+
+    await client.drop_participant("1003", 164)
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/callcontrol/1003/participants/164/drop"
+    assert captured["kwargs"] == {"json": {}}

@@ -121,5 +121,9 @@ class ThreeCXClient:
     async def drop_participant(self, dn: str, participant_id: Any) -> None:
         """Hang up a single participant, e.g. to stop the other still-ringing
         queue members once one of them has already answered.
+
+        3CX's API rejects a bodyless POST here with 415 Unsupported Media Type —
+        it still wants a JSON content type even though there's nothing to send —
+        so an empty JSON object is passed explicitly to get that header set.
         """
-        await self._request("POST", f"/callcontrol/{dn}/participants/{participant_id}/drop")
+        await self._request("POST", f"/callcontrol/{dn}/participants/{participant_id}/drop", json={})
