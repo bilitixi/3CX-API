@@ -126,7 +126,9 @@ async def start_call_sequence(
             detail="queue_dn was not provided and THREECX_QUEUE_DN is not set",
         )
 
-    state = call_sequence_manager.start(dns, queue_dn, payload.interval_seconds)
+    interval_seconds = payload.interval_seconds or settings.threecx_sequence_interval_seconds
+
+    state = call_sequence_manager.start(dns, queue_dn, interval_seconds)
     return _sequence_to_response(state)
 
 

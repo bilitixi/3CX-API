@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # its "dns" field is omitted from the request body, e.g. "1003,1005,1006".
     threecx_sequence_dns: str = ""
 
+    # Default interval_seconds for POST /calls/sequence/start when omitted from the
+    # request body — how long to wait for an answer before trying the next dn.
+    threecx_sequence_interval_seconds: float = 120
+
     @property
     def sequence_dns_list(self) -> List[str]:
         return [dn.strip() for dn in self.threecx_sequence_dns.split(",") if dn.strip()]

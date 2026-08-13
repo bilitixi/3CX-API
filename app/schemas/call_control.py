@@ -42,10 +42,11 @@ class StartCallSequenceRequest(BaseModel):
         None,
         description="Queue each DN gets bridged into once it answers. Defaults to THREECX_QUEUE_DN.",
     )
-    interval_seconds: float = Field(
-        120,
+    interval_seconds: Optional[float] = Field(
+        None,
         gt=0,
-        description="Seconds to wait for an answer before cancelling that call and trying the next dn.",
+        description="Seconds to wait for an answer before cancelling that call and trying the next dn. "
+        "Defaults to THREECX_SEQUENCE_INTERVAL_SECONDS from config if omitted.",
     )
 
 

@@ -158,6 +158,23 @@ def test_start_call_sequence_uses_configured_dns_when_body_omitted(client, monke
     assert captured["args"][0] == ["1003", "1005", "1006"]
 
 
+def test_start_call_sequence_uses_configured_interval_when_omitted(client, monkeypatch):
+    captured = {}
+
+    def fake_start(dns, queue_dn, interval_seconds):
+        captured["args"] = (dns, queue_dn, interval_seconds)
+        return SequenceState(id="seq-1", dns=dns, queue_dn=queue_dn, interval_seconds=interval_seconds)
+
+    monkeypatch.setattr(call_control.settings, "threecx_sequence_interval_seconds", 45)
+    monkeypatch.setattr(call_control.call_sequence_manager, "start", fake_start)
+
+    response = client.post("/api/threecx/calls/sequence/start", json={"dns": ["1003"]})
+
+    assert response.status_code == 200
+    assert response.json()["interval_seconds"] == 45
+    assert captured["args"][2] == 45
+
+
 def test_start_call_sequence_returns_initial_state(client, monkeypatch):
     captured = {}
 
