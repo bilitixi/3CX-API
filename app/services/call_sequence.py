@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -11,6 +12,11 @@ POLL_INTERVAL_SECONDS = 5
 
 # 3CX status strings observed for a bridged/answered participant.
 CONNECTED_STATUSES = {"Connected", "Talking"}
+
+# How long a finished sequence (answered/exhausted/cancelled/error) is kept around
+# for GET /sequence/{id} lookups before start() prunes it, so long-running processes
+# don't accumulate every sequence ever run for the life of the process.
+PRUNE_FINISHED_AFTER_SECONDS = 3600
 
 
 @dataclass
@@ -28,6 +34,8 @@ class SequenceState:
     # The still-ringing participant this sequence is currently responsible for
     # (so it can be dropped on cancel or before moving to the next dn).
     current_participant: Optional[Dict[str, Any]] = None
+    # time.monotonic() timestamp of when _run() finished, for pruning. None while running.
+    finished_at: Optional[float] = None
 
 
 class CallSequenceManager:
@@ -43,12 +51,30 @@ class CallSequenceManager:
         self._latest_sequence_id: Optional[str] = None
 
     def start(self, dns: List[str], queue_dn: str, interval_seconds: float) -> SequenceState:
+        self._prune_finished()
+
         sequence_id = uuid.uuid4().hex
         state = SequenceState(id=sequence_id, dns=dns, queue_dn=queue_dn, interval_seconds=interval_seconds)
         self._sequences[sequence_id] = state
         self._latest_sequence_id = sequence_id
         state.task = asyncio.create_task(self._run(state))
         return state
+
+    def _prune_finished(self) -> None:
+        """Drop sequences that finished more than PRUNE_FINISHED_AFTER_SECONDS ago,
+        so a long-running process doesn't accumulate one entry per call forever.
+        Runs on every start() rather than as a separate background task — cheap,
+        and there's no reason to prune when nothing new is being added.
+        """
+        cutoff = time.monotonic() - PRUNE_FINISHED_AFTER_SECONDS
+        stale_ids = [
+            sequence_id
+            for sequence_id, state in self._sequences.items()
+            if state.finished_at is not None and state.finished_at < cutoff
+        ]
+        for sequence_id in stale_ids:
+            del self._sequences[sequence_id]
+            logger.info("call_sequence_pruned", sequence_id=sequence_id)
 
     def get(self, sequence_id: str) -> Optional[SequenceState]:
         return self._sequences.get(sequence_id)
@@ -126,6 +152,11 @@ class CallSequenceManager:
         except Exception as exc:
             logger.error("call_sequence_failed", sequence_id=state.id, error=str(exc))
             state.status = "error"
+        finally:
+            # Runs on every exit path — answered/exhausted/cancelled/error, and even
+            # when the task itself is cancelled (e.g. manager.shutdown()) — so pruning
+            # can always tell how long ago this sequence stopped doing anything.
+            state.finished_at = time.monotonic()
 
     async def _wait_for_answer_or_timeout(self, state: SequenceState, dn: str, participant_id) -> bool:
         """Poll the participant's status until it's answered, the interval elapses,

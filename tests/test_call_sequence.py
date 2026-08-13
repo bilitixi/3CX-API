@@ -1,8 +1,9 @@
 import asyncio
+import time
 
 import pytest
 
-from app.services.call_sequence import CallSequenceManager
+from app.services.call_sequence import PRUNE_FINISHED_AFTER_SECONDS, CallSequenceManager
 
 # Keep test intervals well under the manager's poll interval so timeouts and
 # cancellation actually get exercised quickly instead of waiting out a real poll tick.
@@ -142,3 +143,67 @@ async def test_makecall_failure_is_logged_and_sequence_continues():
     assert state.status == "answered"
     assert state.answered_dn == "1005"
     assert client.dropped == []  # 1003 never got a participant id to drop
+
+
+@pytest.mark.asyncio
+async def test_finished_at_is_set_once_the_sequence_stops():
+    client = FakeClient(statuses={"1003": "Connected"})
+    manager = CallSequenceManager(client=client)
+
+    state = manager.start(["1003"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    assert state.finished_at is None  # not set while still running
+
+    await _wait_until_finished(state)
+
+    assert state.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_start_prunes_sequences_finished_long_ago():
+    client = FakeClient()
+    manager = CallSequenceManager(client=client)
+
+    old = manager.start(["1003"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    await _wait_until_finished(old)
+    # Backdate it as if it finished well past the prune window.
+    old.finished_at = time.monotonic() - PRUNE_FINISHED_AFTER_SECONDS - 1
+
+    # Any subsequent start() sweeps for stale finished entries.
+    new = manager.start(["1005"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+
+    assert manager.get(old.id) is None
+    assert manager.get(new.id) is new
+
+    await _wait_until_finished(new)
+
+
+@pytest.mark.asyncio
+async def test_start_does_not_prune_recently_finished_sequences():
+    client = FakeClient()
+    manager = CallSequenceManager(client=client)
+
+    old = manager.start(["1003"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    await _wait_until_finished(old)  # finished_at is "just now", well inside the window
+
+    new = manager.start(["1005"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+
+    assert manager.get(old.id) is old
+
+    await _wait_until_finished(new)
+
+
+@pytest.mark.asyncio
+async def test_start_does_not_prune_still_running_sequences():
+    client = FakeClient()  # nobody answers, so it'll sit waiting
+    manager = CallSequenceManager(client=client)
+
+    running = manager.start(["1003"], queue_dn="8003", interval_seconds=10)
+    await asyncio.sleep(0.05)  # let it start dialing
+
+    new = manager.start(["1005"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+
+    assert manager.get(running.id) is running  # finished_at is None, never eligible for pruning
+
+    await manager.cancel(running.id)
+    await _wait_until_finished(running)
+    await _wait_until_finished(new)
