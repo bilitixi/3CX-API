@@ -14,6 +14,8 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("app_startup")
 
+    call_sequence_manager.start_sweeper()
+
     yield
 
     call_sequence_manager.shutdown()

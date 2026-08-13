@@ -159,7 +159,7 @@ async def test_finished_at_is_set_once_the_sequence_stops():
 
 
 @pytest.mark.asyncio
-async def test_start_prunes_sequences_finished_long_ago():
+async def test_prune_finished_removes_sequences_finished_long_ago():
     client = FakeClient()
     manager = CallSequenceManager(client=client)
 
@@ -168,42 +168,77 @@ async def test_start_prunes_sequences_finished_long_ago():
     # Backdate it as if it finished well past the prune window.
     old.finished_at = time.monotonic() - PRUNE_FINISHED_AFTER_SECONDS - 1
 
-    # Any subsequent start() sweeps for stale finished entries.
-    new = manager.start(["1005"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    manager._prune_finished()
 
     assert manager.get(old.id) is None
-    assert manager.get(new.id) is new
-
-    await _wait_until_finished(new)
 
 
 @pytest.mark.asyncio
-async def test_start_does_not_prune_recently_finished_sequences():
+async def test_prune_finished_keeps_recently_finished_sequences():
     client = FakeClient()
     manager = CallSequenceManager(client=client)
 
     old = manager.start(["1003"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
     await _wait_until_finished(old)  # finished_at is "just now", well inside the window
 
-    new = manager.start(["1005"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    manager._prune_finished()
 
     assert manager.get(old.id) is old
 
-    await _wait_until_finished(new)
-
 
 @pytest.mark.asyncio
-async def test_start_does_not_prune_still_running_sequences():
+async def test_prune_finished_keeps_still_running_sequences():
     client = FakeClient()  # nobody answers, so it'll sit waiting
     manager = CallSequenceManager(client=client)
 
     running = manager.start(["1003"], queue_dn="8003", interval_seconds=10)
     await asyncio.sleep(0.05)  # let it start dialing
 
-    new = manager.start(["1005"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    manager._prune_finished()
 
     assert manager.get(running.id) is running  # finished_at is None, never eligible for pruning
 
     await manager.cancel(running.id)
     await _wait_until_finished(running)
-    await _wait_until_finished(new)
+
+
+@pytest.mark.asyncio
+async def test_sweep_loop_prunes_on_a_timer():
+    client = FakeClient()
+    manager = CallSequenceManager(client=client, sweep_interval_seconds=FAST_INTERVAL)
+
+    old = manager.start(["1003"], queue_dn="8003", interval_seconds=FAST_INTERVAL)
+    await _wait_until_finished(old)
+    old.finished_at = time.monotonic() - PRUNE_FINISHED_AFTER_SECONDS - 1
+
+    manager.start_sweeper()
+    try:
+        # Give the sweep loop a couple of its (fast) intervals to fire.
+        await asyncio.sleep(FAST_INTERVAL * 3)
+        assert manager.get(old.id) is None
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_start_sweeper_is_idempotent():
+    manager = CallSequenceManager(client=FakeClient(), sweep_interval_seconds=FAST_INTERVAL)
+
+    manager.start_sweeper()
+    first_task = manager._sweep_task
+    manager.start_sweeper()
+
+    assert manager._sweep_task is first_task  # second call was a no-op
+
+    manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_the_sweep_task():
+    manager = CallSequenceManager(client=FakeClient(), sweep_interval_seconds=FAST_INTERVAL)
+    manager.start_sweeper()
+
+    manager.shutdown()
+    await asyncio.sleep(0)  # let the cancellation propagate
+
+    assert manager._sweep_task is None

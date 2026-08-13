@@ -14,9 +14,12 @@ POLL_INTERVAL_SECONDS = 5
 CONNECTED_STATUSES = {"Connected", "Talking"}
 
 # How long a finished sequence (answered/exhausted/cancelled/error) is kept around
-# for GET /sequence/{id} lookups before start() prunes it, so long-running processes
-# don't accumulate every sequence ever run for the life of the process.
+# for GET /sequence/{id} lookups before the background sweep prunes it, so a
+# long-running process doesn't accumulate one entry per call forever.
 PRUNE_FINISHED_AFTER_SECONDS = 3600
+
+# How often the background sweep task checks for stale finished sequences to prune.
+SWEEP_INTERVAL_SECONDS = 300
 
 
 @dataclass
@@ -45,14 +48,14 @@ class CallSequenceManager:
     call in the sequence is ever active at a time.
     """
 
-    def __init__(self, client: Optional[ThreeCXClient] = None):
+    def __init__(self, client: Optional[ThreeCXClient] = None, sweep_interval_seconds: float = SWEEP_INTERVAL_SECONDS):
         self.client = client or ThreeCXClient()
         self._sequences: Dict[str, SequenceState] = {}
         self._latest_sequence_id: Optional[str] = None
+        self._sweep_interval_seconds = sweep_interval_seconds
+        self._sweep_task: Optional[asyncio.Task] = None
 
     def start(self, dns: List[str], queue_dn: str, interval_seconds: float) -> SequenceState:
-        self._prune_finished()
-
         sequence_id = uuid.uuid4().hex
         state = SequenceState(id=sequence_id, dns=dns, queue_dn=queue_dn, interval_seconds=interval_seconds)
         self._sequences[sequence_id] = state
@@ -60,12 +63,20 @@ class CallSequenceManager:
         state.task = asyncio.create_task(self._run(state))
         return state
 
-    def _prune_finished(self) -> None:
-        """Drop sequences that finished more than PRUNE_FINISHED_AFTER_SECONDS ago,
-        so a long-running process doesn't accumulate one entry per call forever.
-        Runs on every start() rather than as a separate background task — cheap,
-        and there's no reason to prune when nothing new is being added.
+    def start_sweeper(self) -> None:
+        """Start the background task that periodically prunes finished sequences.
+        Call once at app startup; safe to call more than once (no-op if already running).
         """
+        if self._sweep_task is None:
+            self._sweep_task = asyncio.create_task(self._sweep_loop())
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._sweep_interval_seconds)
+            self._prune_finished()
+
+    def _prune_finished(self) -> None:
+        """Drop sequences that finished more than PRUNE_FINISHED_AFTER_SECONDS ago."""
         cutoff = time.monotonic() - PRUNE_FINISHED_AFTER_SECONDS
         stale_ids = [
             sequence_id
@@ -96,10 +107,15 @@ class CallSequenceManager:
         return await self.cancel(self._latest_sequence_id)
 
     def shutdown(self) -> None:
-        """Cancel every in-flight sequence's background task, e.g. on app shutdown."""
+        """Cancel every in-flight sequence's background task and the sweeper, e.g.
+        on app shutdown.
+        """
         for state in self._sequences.values():
             if state.task is not None:
                 state.task.cancel()
+        if self._sweep_task is not None:
+            self._sweep_task.cancel()
+            self._sweep_task = None
 
     async def _run(self, state: SequenceState) -> None:
         try:

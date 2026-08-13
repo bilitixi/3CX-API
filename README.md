@@ -99,5 +99,7 @@ pytest
   API (`makecall`, participant status lookup/dropping).
 - `app/services/call_sequence.py` — `CallSequenceManager` runs each
   sequence as a background task: dials the next DN, polls it for an
-  answer, drops it on timeout, and stops as soon as one answers.
+  answer, drops it on timeout, and stops as soon as one answers. A separate
+  background sweep task prunes finished sequences older than an hour every
+  5 minutes, so a long-running process doesn't accumulate history forever.
 - `app/api/routes/call_control.py` — the `/calls/sequence/*` routes.
