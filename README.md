@@ -1,55 +1,67 @@
 # 3CX API
 
-Standalone FastAPI service exposing the 3CX Call Control "dial into queue"
+Standalone FastAPI service exposing a 3CX Call Control "call sequence"
 workflow, ported from the main backend repo.
 
 ## What it does
 
-`POST /api/threecx/calls/dial-into-queue` makes `source_dn`'s phone ring
-first. Once answered, it is connected into `queue_dn`, which then rings
-whichever agents are logged into that queue per its configured ring
-strategy. As soon as one agent answers, the other still-ringing queue
-members are automatically dropped.
+`POST /api/threecx/calls/sequence/start` rings each DN in an ordered list
+into a queue, one at a time. It waits `interval_seconds` for an answer
+before dropping that call and trying the next DN, and stops as soon as one
+answers. Only one call is ever ringing at a time — the previous one is
+dropped before the next starts.
 
-Both `source_dn` and `queue_dn` are optional in the request body — they
-default to `THREECX_SOURCE_DN` / `THREECX_QUEUE_DN` from config, so the
-endpoint can be called with no body at all:
+`dns`, `queue_dn`, and `interval_seconds` are all optional in the request
+body — they default to `THREECX_SEQUENCE_DNS` / `THREECX_QUEUE_DN` /
+`THREECX_SEQUENCE_INTERVAL_SECONDS` from config, so the endpoint can be
+called with no body at all:
 
 ```bash
-curl -X POST https://your-host/api/threecx/calls/dial-into-queue \
+curl -X POST https://your-host/api/threecx/calls/sequence/start \
   -H "Authorization: Bearer $API_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"source_dn": "0800111222"}'
+  -d '{"dns": ["1003", "1005", "1006"], "queue_dn": "8003"}'
 ```
 
-The response includes the 3CX `call_id` for the call:
+The response returns immediately with the sequence's id and initial status
+— the dialing itself happens in the background:
 
 ```json
-{ "source_dn": "0800111222", "queue_dn": "8003", "call_id": 60 }
+{
+  "sequence_id": "a1b2c3...",
+  "status": "running",
+  "dns": ["1003", "1005", "1006"],
+  "queue_dn": "8003",
+  "interval_seconds": 120,
+  "current_index": 0,
+  "current_dn": "1003",
+  "answered_dn": null
+}
 ```
 
-## Capturing DTMF digits (exploratory)
+`status` is one of `running` / `answered` / `exhausted` / `cancelled` /
+`error`.
 
-`GET /api/threecx/calls/{call_id}/dtmf` returns any DTMF digit-strings 3CX
-has reported for that call so far:
+### Checking progress
 
 ```bash
 curl -H "Authorization: Bearer $API_AUTH_TOKEN" \
-  https://your-host/api/threecx/calls/60/dtmf
-# {"call_id": "60", "digits": ["1234"]}
+  https://your-host/api/threecx/calls/sequence/a1b2c3...
 ```
 
-This relies on 3CX's callcontrol WebSocket occasionally carrying a
-`dtmf_input` field on participant events (`event.attached_data.dtmf_input`,
-per 3CX's own
-[Custom IVR sample](https://github.com/3cx/call-control-examples)). Whether
-this fires for a participant bridged in via `/makecall` — as opposed to one
-an app is directly streaming prompt audio to/from, like that sample —
-**hasn't been confirmed**. To test it: dial into a queue, key in digits once
-the queue side answers, then poll the endpoint above. If it stays empty,
-DTMF capture for this flow will need a 3CX Call Flow Designer app instead
-(see `app/services/escalation.py` docstring for the WebSocket message shape
-this is built on).
+### Cancelling
+
+```bash
+# a specific sequence
+curl -X POST -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  https://your-host/api/threecx/calls/sequence/a1b2c3.../cancel
+
+# the most recently started sequence, no id needed
+curl -X POST -H "Authorization: Bearer $API_AUTH_TOKEN" \
+  https://your-host/api/threecx/calls/sequence/cancel
+```
+
+Either drops whichever DN is currently ringing and stops the sequence.
 
 ## Configuration
 
@@ -57,10 +69,14 @@ Copy `.env.example` to `.env` and fill in:
 
 - `THREECX_PBX_BASE_URL`, `THREECX_CLIENT_ID`, `THREECX_CLIENT_SECRET` — 3CX
   Call Control API credentials.
-- `THREECX_QUEUE_DN` / `THREECX_SOURCE_DN` — defaults used when the request
-  body omits them.
+- `THREECX_QUEUE_DN` / `THREECX_SEQUENCE_DNS` / `THREECX_SEQUENCE_INTERVAL_SECONDS`
+  — defaults used when the request body omits them.
 - `API_AUTH_TOKEN` — shared bearer token required on every request to this
   service. Leave blank for local development to skip auth.
+
+Every DN passed to `dns` (or set in `THREECX_SEQUENCE_DNS`) must be in the
+3CX Call Control API app's allowed-extensions list in 3CX admin, and must
+not be the queue itself — a queue can't originate a call.
 
 ## Running locally
 
@@ -78,10 +94,10 @@ pytest
 ## Architecture
 
 - `app/services/token_manager.py` — caches and refreshes the 3CX bearer
-  token, notifying subscribers (the WebSocket watcher) on refresh.
+  token.
 - `app/services/client.py` — thin REST wrapper over the 3CX Call Control
-  API (`makecall`, participant listing/dropping).
-- `app/services/escalation.py` — `QueueAnswerWatcher` listens on 3CX's
-  callcontrol WebSocket and drops the other still-ringing participants of a
-  watched call as soon as one answers.
-- `app/api/routes/call_control.py` — the `/calls/dial-into-queue` route.
+  API (`makecall`, participant status lookup/dropping).
+- `app/services/call_sequence.py` — `CallSequenceManager` runs each
+  sequence as a background task: dials the next DN, polls it for an
+  answer, drops it on timeout, and stops as soon as one answers.
+- `app/api/routes/call_control.py` — the `/calls/sequence/*` routes.
