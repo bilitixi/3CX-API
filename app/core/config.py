@@ -1,3 +1,5 @@
+from typing import List
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,12 +20,20 @@ class Settings(BaseSettings):
     threecx_grant_type: str = "client_credentials"
     threecx_token_safety_margin_seconds: int = 60
 
-    # Default queue DN for POST /calls/dial-into-queue, e.g. "8003".
+    # Default queue/destination DN for POST /calls/sequence/start, e.g. "8003".
     threecx_queue_dn: str = ""
 
-    # Default source_dn for POST /calls/dial-into-queue, e.g. the internal number that
-    # should ring first before being connected into the queue.
-    threecx_source_dn: str = ""
+    # Default, comma-separated ordered list of DNs for POST /calls/sequence/start when
+    # its "dns" field is omitted from the request body, e.g. "1003,1005,1006".
+    threecx_sequence_dns: str = ""
+
+    # Default interval_seconds for POST /calls/sequence/start when omitted from the
+    # request body — how long to wait for an answer before trying the next dn.
+    threecx_sequence_interval_seconds: float = 120
+
+    @property
+    def sequence_dns_list(self) -> List[str]:
+        return [dn.strip() for dn in self.threecx_sequence_dns.split(",") if dn.strip()]
 
 
 settings = Settings()

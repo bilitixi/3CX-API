@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import call_control
 from app.core.auth import require_api_token
 from app.core.logging import configure_logging, logger
-from app.services.escalation import queue_answer_watcher
+from app.services.call_sequence import call_sequence_manager
 
 
 @asynccontextmanager
@@ -14,18 +14,18 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("app_startup")
 
-    queue_answer_watcher.start()
+    call_sequence_manager.start_sweeper()
 
     yield
 
-    queue_answer_watcher.stop()
+    call_sequence_manager.shutdown()
     logger.info("app_shutdown")
 
 
 app = FastAPI(
     title="3CX Call Control API",
-    description="Dial-into-queue call control workflow: rings a source DN first, "
-    "then bridges it into a 3CX queue once answered.",
+    description="Call sequence workflow: rings each dn in an ordered list into a "
+    "3CX queue, one at a time, until one answers.",
     version="1.0.0",
     lifespan=lifespan,
 )
